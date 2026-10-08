@@ -90,12 +90,29 @@ def fetch_all_programs():
 def load_watch_list():
     if not WATCH_FILE.is_file():
         sys.exit(f"ERROR: {WATCH_FILE} not found")
-    names = []
+    entries = []
     for line in WATCH_FILE.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
+        line = line.split(" #", 1)[0] if line.strip().startswith("http") else line.split("#", 1)[0]
+        line = line.strip()
         if line:
-            names.append(line.lower())
-    return names
+            entries.append(line.lower())
+    return entries
+
+
+def normalize_url(url):
+    url = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    if url.endswith("/detail"):
+        url = url[: -len("/detail")]
+    return url
+
+
+def matches(rec, entry):
+    """Entry is either a pasted program page URL, or a case-insensitive
+    substring of the program name / program link."""
+    link = ((rec.get("webLinks") or {}).get("detail") or "").lower()
+    if entry.startswith("http"):
+        return normalize_url(entry) in normalize_url(link)
+    return entry in (rec.get("name") or "").lower() or entry in link
 
 
 def main():
@@ -106,18 +123,20 @@ def main():
 
     # Current status of watched programs only: {id: {name, status, link}}
     current = {}
+    unmatched = set(watch)
     for rec in fetch_all_programs():
-        if (rec.get("name") or "").lower() in watch:
-            current[rec["id"]] = {
-                "name": rec["name"],
-                "status": (rec.get("status") or {}).get("value") or "Unknown",
-                "link": (rec.get("webLinks") or {}).get("detail", ""),
-            }
+        hit = [e for e in watch if matches(rec, e)]
+        if not hit:
+            continue
+        unmatched -= set(hit)
+        current[rec["id"]] = {
+            "name": rec["name"],
+            "status": (rec.get("status") or {}).get("value") or "Unknown",
+            "link": (rec.get("webLinks") or {}).get("detail", ""),
+        }
 
-    found = {p["name"].lower() for p in current.values()}
-    for name in watch:
-        if name not in found:
-            print(f"WARNING: no matching program (or not visible to you) for: {name}", file=sys.stderr)
+    for entry in sorted(unmatched):
+        print(f"WARNING: no program matched (or not visible to you): {entry}", file=sys.stderr)
 
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -125,6 +144,8 @@ def main():
     if not STATE_FILE.is_file() or STATE_FILE.stat().st_size == 0:
         STATE_FILE.write_text(json.dumps({i: p["status"] for i, p in current.items()}, indent=2))
         summary = "\n".join(f"• {p['name']}: {p['status']}" for p in current.values())
+        if unmatched:
+            summary += "\n\n⚠️ No match for: " + ", ".join(sorted(unmatched))
         send_telegram(
             f"✅ Intigriti status monitor started — watching {len(current)} programs\n\n{summary}"
         )
