@@ -8,6 +8,7 @@ heartbeat at most once every 6 hours when nothing changed.
 State lives in state/ and is committed back by the workflow.
 """
 
+import difflib
 import json
 import os
 import sys
@@ -20,6 +21,7 @@ API_BASE = "https://api.intigriti.com/external/researcher/v1"
 WATCH_FILE = Path(os.environ.get("WATCH_FILE", "watched_programs.txt"))
 STATE_FILE = Path("state/intigriti_program_status.json")  # {"<program id>": "<status>"}
 HEARTBEAT_FILE = Path("state/intigriti_status_last_heartbeat")
+UNMATCHED_FILE = Path("state/intigriti_status_unmatched.json")  # entries already warned about
 HEARTBEAT_INTERVAL_SECS = 6 * 3600
 
 
@@ -106,13 +108,38 @@ def normalize_url(url):
     return url
 
 
+def url_key(url):
+    """'https://app.intigriti.com/researcher/programs/co/prog/detail?x' -> 'co/prog'"""
+    path = normalize_url(url)
+    if "/programs/" in path:
+        return path.split("/programs/", 1)[1]
+    return "/".join(path.split("/")[-2:])
+
+
 def matches(rec, entry):
     """Entry is either a pasted program page URL, or a case-insensitive
     substring of the program name / program link."""
     link = ((rec.get("webLinks") or {}).get("detail") or "").lower()
     if entry.startswith("http"):
-        return normalize_url(entry) in normalize_url(link)
+        return url_key(entry) in link
     return entry in (rec.get("name") or "").lower() or entry in link
+
+
+def suggest(records, entry, n=3):
+    """Closest programs to an unmatched entry, as 'Name (link)' strings."""
+    key = url_key(entry) if entry.startswith("http") else entry
+    scored = []
+    for rec in records:
+        name = (rec.get("name") or "").lower()
+        link = ((rec.get("webLinks") or {}).get("detail") or "").lower()
+        score = max(
+            difflib.SequenceMatcher(None, key, name).ratio(),
+            difflib.SequenceMatcher(None, key, link).ratio(),
+            difflib.SequenceMatcher(None, key.split("/")[-1], name).ratio(),
+        )
+        scored.append((score, f"{rec.get('name')} ({link or 'no link'})"))
+    scored.sort(reverse=True)
+    return [text for score, text in scored[:n] if score > 0.3]
 
 
 def main():
@@ -124,7 +151,8 @@ def main():
     # Current status of watched programs only: {id: {name, status, link}}
     current = {}
     unmatched = set(watch)
-    for rec in fetch_all_programs():
+    all_records = fetch_all_programs()
+    for rec in all_records:
         hit = [e for e in watch if matches(rec, e)]
         if not hit:
             continue
@@ -135,17 +163,38 @@ def main():
             "link": (rec.get("webLinks") or {}).get("detail", ""),
         }
 
+    hints = {}
     for entry in sorted(unmatched):
+        hints[entry] = suggest(all_records, entry)
         print(f"WARNING: no program matched (or not visible to you): {entry}", file=sys.stderr)
+        for h in hints[entry]:
+            print(f"    closest: {h}", file=sys.stderr)
 
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Telegram warning once per unmatched entry (re-warns if you edit the entry)
+    try:
+        warned = set(json.loads(UNMATCHED_FILE.read_text()))
+    except (FileNotFoundError, ValueError):
+        warned = set()
+    new_unmatched = sorted(unmatched - warned)
+    if new_unmatched and STATE_FILE.is_file() and STATE_FILE.stat().st_size > 0:
+        send_telegram(
+            "⚠️ Intigriti status monitor: no program matched (or not visible to you):\n"
+            + "\n".join(f"• {e}" for e in new_unmatched)
+        )
+    UNMATCHED_FILE.write_text(json.dumps(sorted(unmatched)))
 
     # First run: store baseline, one summary message, no alerts
     if not STATE_FILE.is_file() or STATE_FILE.stat().st_size == 0:
         STATE_FILE.write_text(json.dumps({i: p["status"] for i, p in current.items()}, indent=2))
         summary = "\n".join(f"• {p['name']}: {p['status']}" for p in current.values())
-        if unmatched:
-            summary += "\n\n⚠️ No match for: " + ", ".join(sorted(unmatched))
+        for entry in sorted(unmatched):
+            summary += f"\n\n⚠️ No match for: {entry}"
+            if hints[entry]:
+                summary += "\nClosest: " + "; ".join(hints[entry])
+            else:
+                summary += "\nNo similar program found in your Intigriti program list."
         send_telegram(
             f"✅ Intigriti status monitor started — watching {len(current)} programs\n\n{summary}"
         )
@@ -158,7 +207,11 @@ def main():
     # New watch entries (not in previous) get a silent baseline
     for pid, p in current.items():
         old = previous.get(pid)
-        if old is None or old == p["status"]:
+        if old is None:
+            send_telegram(f"➕ Now watching *{p['name']}*: {p['status']}", silent=True)
+            alerted = True
+            continue
+        if old == p["status"]:
             continue
         new = p["status"]
         if old == "Suspended" and new == "Open":
