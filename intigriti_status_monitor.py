@@ -2,8 +2,9 @@
 """
 intigriti_status_monitor.py
 Watches specific Intigriti programs (names listed in watched_programs.txt) and
-sends a Telegram alert whenever their status changes, with a special
-UNSUSPENDED / SUSPENDED headline for those transitions.
+sends a Telegram alert immediately whenever their status changes, with a special
+UNSUSPENDED / SUSPENDED headline for those transitions, plus a silent
+heartbeat at most once every 6 hours when nothing changed.
 State lives in state/ and is committed back by the workflow.
 """
 
@@ -18,6 +19,8 @@ import requests
 API_BASE = "https://api.intigriti.com/external/researcher/v1"
 WATCH_FILE = Path(os.environ.get("WATCH_FILE", "watched_programs.txt"))
 STATE_FILE = Path("state/intigriti_program_status.json")  # {"<program id>": "<status>"}
+HEARTBEAT_FILE = Path("state/intigriti_status_last_heartbeat")
+HEARTBEAT_INTERVAL_SECS = 6 * 3600
 
 
 def env(name):
@@ -32,12 +35,33 @@ TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = env("TELEGRAM_CHAT_ID")
 
 
-def send_telegram(message):
+def send_telegram(message, silent=False):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        data={"chat_id": TELEGRAM_CHAT_ID, "parse_mode": "Markdown", "text": message},
+        data={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "parse_mode": "Markdown",
+            "disable_notification": "true" if silent else "false",
+            "text": message,
+        },
         timeout=30,
     )
+
+
+def send_heartbeat_if_due(current):
+    now = int(time.time())
+    try:
+        last = int(HEARTBEAT_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        last = 0
+    if now - last >= HEARTBEAT_INTERVAL_SECS:
+        summary = ", ".join(f"{p['name']}: {p['status']}" for p in current.values())
+        send_telegram(
+            f"✅ Intigriti status check OK at {time.strftime('%H:%M UTC', time.gmtime())}: "
+            f"no changes ({summary or 'nothing watched'})",
+            silent=True,
+        )
+        HEARTBEAT_FILE.write_text(str(now))
 
 
 def fetch_all_programs():
@@ -104,10 +128,12 @@ def main():
         send_telegram(
             f"✅ Intigriti status monitor started — watching {len(current)} programs\n\n{summary}"
         )
+        HEARTBEAT_FILE.write_text(str(int(time.time())))
         return
 
     previous = json.loads(STATE_FILE.read_text())
 
+    alerted = False
     # New watch entries (not in previous) get a silent baseline
     for pid, p in current.items():
         old = previous.get(pid)
@@ -121,11 +147,16 @@ def main():
         else:
             header = "🔄 *Status change*"
         send_telegram(f"{header}\n*{p['name']}*\n{old} → {new}\n\n{p['link']}")
+        alerted = True
         time.sleep(1)
 
     # Merge: keep old entries (flaky response), overwrite with current
     previous.update({i: p["status"] for i, p in current.items()})
     STATE_FILE.write_text(json.dumps(previous, indent=2))
+
+    # No heartbeat on a run that already sent real alerts
+    if not alerted:
+        send_heartbeat_if_due(current)
 
 
 if __name__ == "__main__":
