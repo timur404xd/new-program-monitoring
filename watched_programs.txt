@@ -1,0 +1,3 @@
+# One Intigriti program name per line (case-insensitive, must match the name exactly)
+Pendo
+Leapsome
