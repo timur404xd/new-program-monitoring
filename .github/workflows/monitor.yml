@@ -22,8 +22,12 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
+      # Alert destinations: each Discord secret that exists is used; Telegram is used while
+      # both TELEGRAM_* secrets exist (delete those lines/secrets to go Discord-only).
       - name: Run Bugcrowd monitor
         env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_NEW_PROGRAMS_WEBHOOK }}
+          DISCORD_HEARTBEAT_WEBHOOK_URL: ${{ secrets.DISCORD_STATUS_WEBHOOK }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
@@ -31,8 +35,11 @@ jobs:
           ./bugcrowd_monitor.sh
 
       - name: Run Intigriti monitor
+        if: always()  # still run if the Bugcrowd monitor failed
         env:
           INTIGRITI_API_TOKEN: ${{ secrets.INTIGRITI_API_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_NEW_PROGRAMS_WEBHOOK }}
+          DISCORD_HEARTBEAT_WEBHOOK_URL: ${{ secrets.DISCORD_STATUS_WEBHOOK }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
@@ -43,6 +50,14 @@ jobs:
         if: always()  # still run if an earlier monitor failed
         env:
           INTIGRITI_API_TOKEN: ${{ secrets.INTIGRITI_API_TOKEN }}
+          # which programs to watch: read from the #status-watchlist channel by the bot
+          # (watched_programs.txt is only used if these are not set)
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_STATUS_WATCHLIST_CHANNEL_ID: ${{ secrets.DISCORD_STATUS_WATCHLIST_CHANNEL_ID }}
+          DISCORD_OWNER_ID: ${{ secrets.DISCORD_OWNER_ID }}
+          # where status changes go
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_PROGRAM_STATUS_WEBHOOK }}
+          DISCORD_HEARTBEAT_WEBHOOK_URL: ${{ secrets.DISCORD_STATUS_WEBHOOK }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python3 intigriti_status_monitor.py
