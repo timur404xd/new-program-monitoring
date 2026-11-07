@@ -4,8 +4,8 @@
 # and/or Telegram.
 # Designed to run in GitHub Actions — state file lives in the repo checkout
 # so it can be committed back between runs (runners are stateless).
-# Sends a silent daily heartbeat on the first run at/after HEARTBEAT_HOUR:00
-# in HEARTBEAT_TZ (default 00:00 Africa/Cairo).
+# Alerts go to Discord and Telegram (whichever are configured). A silent heartbeat goes to
+# Discord only, at most once every HEARTBEAT_INTERVAL_SECS (default 6 hours).
 
 set -euo pipefail
 
@@ -14,6 +14,7 @@ TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 # Discord: new-program alerts go to DISCORD_WEBHOOK_URL; startup notice and heartbeat go to
 # DISCORD_HEARTBEAT_WEBHOOK_URL (falls back to DISCORD_WEBHOOK_URL when not set).
+# The heartbeat is Discord-only; the startup notice also goes to Telegram.
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 DISCORD_HEARTBEAT_WEBHOOK_URL="${DISCORD_HEARTBEAT_WEBHOOK_URL:-$DISCORD_WEBHOOK_URL}"
 DISCORD_USERNAME="${DISCORD_USERNAME:-Intigriti Programs}"
@@ -27,7 +28,7 @@ STATE_DIR="state"
 STATE_FILE="${STATE_DIR}/known_programs.json"
 HEARTBEAT_FILE="${STATE_DIR}/intigriti_last_heartbeat"
 HEARTBEAT_TZ="${HEARTBEAT_TZ:-Africa/Cairo}"
-HEARTBEAT_HOUR="${HEARTBEAT_HOUR:-0}"  # 0 = 12 am
+HEARTBEAT_INTERVAL_SECS="${HEARTBEAT_INTERVAL_SECS:-$((6 * 3600))}"
 API_BASE="https://api.intigriti.com/external/researcher/v1"
 
 mkdir -p "$STATE_DIR"
@@ -74,7 +75,7 @@ discord_post() {
   return 1
 }
 
-# Startup notice / heartbeat: Discord status channel (if set) + Telegram (if set).
+# Startup notice: Discord status channel (if set) + Telegram (if set).
 # Second argument "true" sends it silently (no sound/vibration).
 notify_status() {
   local text="$1" silent="${2:-false}" flags=4
@@ -158,7 +159,6 @@ ${link}"
   echo "$msg"
 }
 
-# Fires once per day: on the first run at/after today's HEARTBEAT_HOUR:00 in HEARTBEAT_TZ.
 # New-program alert as a Discord embed (built entirely by jq from the list record + detail)
 build_discord_payload() {
   jq -n --argjson r "$1" --argjson d "$2" --arg u "$DISCORD_USERNAME" '
@@ -185,19 +185,28 @@ build_discord_payload() {
        } + (if ($r.webLinks.detail // "") | startswith("http") then {url: $r.webLinks.detail} else {} end))]}'
 }
 
+# Heartbeat: Discord only, silent, at most once every HEARTBEAT_INTERVAL_SECS.
+# The timestamp is only advanced when Discord accepted the message, so a failed send is retried.
 send_heartbeat_if_due() {
   local current_count="$1"
   local new_count="$2"
-  local now last_heartbeat slot
+  local now last_heartbeat payload
 
+  if [[ -z "$DISCORD_HEARTBEAT_WEBHOOK_URL" ]]; then
+    echo "INFO: no Discord webhook set, heartbeat skipped (heartbeats are Discord-only)" >&2
+    return 0
+  fi
   now=$(date -u +%s)
-  slot=$(TZ="$HEARTBEAT_TZ" date -d "today $(printf '%02d' "$HEARTBEAT_HOUR"):00" +%s)
   last_heartbeat=0
   [[ -s "$HEARTBEAT_FILE" ]] && last_heartbeat=$(cat "$HEARTBEAT_FILE")
 
-  if (( now >= slot && last_heartbeat < slot )); then
-    notify_status "✅ Daily Intigriti check at $(TZ="$HEARTBEAT_TZ" date +'%H:%M %Z'): monitor alive, ${new_count} new program(s) this run (tracking ${current_count})" true
-    echo "$now" > "$HEARTBEAT_FILE"
+  if (( now - last_heartbeat >= HEARTBEAT_INTERVAL_SECS )); then
+    payload=$(jq -n --arg u "$DISCORD_USERNAME" \
+      --arg c "✅ Intigriti check at $(TZ="$HEARTBEAT_TZ" date +'%H:%M %Z'): monitor alive, ${new_count} new program(s) this run (tracking ${current_count})" \
+      '{username: $u, content: $c, flags: 4100, allowed_mentions: {parse: []}}')
+    if discord_post "$DISCORD_HEARTBEAT_WEBHOOK_URL" "$payload"; then
+      echo "$now" > "$HEARTBEAT_FILE"
+    fi
   fi
 }
 
@@ -228,14 +237,14 @@ if [[ -f "$STATE_FILE" ]]; then
     done <<< "$new_ids"
   fi
 
-  # Daily heartbeat is sent at 12 am even if this run also sent alerts.
+  # Heartbeat every 6 hours (Discord only), also on runs that sent alerts.
   total_count=$(echo "$all_known" | wc -l)
   new_count=$(echo "$new_ids" | sed '/^$/d' | wc -l)
   send_heartbeat_if_due "$total_count" "$new_count"
 else
   all_known="$current_ids"
   notify_status "✅ Intigriti monitor started — tracking $(echo "$current_ids" | wc -l) programs."
-  date -u +%s > "$HEARTBEAT_FILE"  # next heartbeat at the coming midnight
+  date -u +%s > "$HEARTBEAT_FILE"  # first heartbeat 6 hours after the baseline
 fi
 
 echo "$all_known" > "$STATE_FILE"
