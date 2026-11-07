@@ -1,7 +1,0 @@
-# One entry per line. Either works:
-#  - part of the program name (case-insensitive), e.g.  business systems
-#  - the program page URL pasted straight from your browser
-# An entry that matches several programs watches all of them.
-https://app.intigriti.com/researcher/programs/business-systems-dk/dk-bscontrolpanels/detail
-pendo
-leapsome
