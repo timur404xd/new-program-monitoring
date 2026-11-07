@@ -21,12 +21,13 @@ Alerts (configure one or both):
   Discord  DISCORD_WEBHOOK_URL            channel for status changes (embeds: green when a
                                           program reopens, red when it is suspended)
            DISCORD_HEARTBEAT_WEBHOOK_URL  optional channel for the startup notice, warnings
-                                          and the daily heartbeat (defaults to the main one)
+                                          and the heartbeat (defaults to the main one)
            DISCORD_USERNAME               optional display name (default "Intigriti Status")
   Telegram TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
 
-A silent heartbeat is sent once a day, on the first run at or after HEARTBEAT_HOUR:00 in
-HEARTBEAT_TZ (default 00:00 Africa/Cairo).
+Status changes and "now watching" notices go to both Discord and Telegram (whichever are
+configured); so do the startup notice and unmatched-entry warnings. The silent heartbeat goes
+to Discord only, at most once every HEARTBEAT_INTERVAL_SECS (default 6 hours).
 State lives in state/ and is committed back by the workflow.
 """
 
@@ -50,7 +51,7 @@ HEARTBEAT_FILE = Path("state/intigriti_status_last_heartbeat")
 UNMATCHED_FILE = Path("state/intigriti_status_unmatched.json")  # entries already warned about
 WATCH_CACHE_FILE = Path("state/intigriti_status_watchlist_cache.json")  # last Discord watchlist
 HEARTBEAT_TZ = ZoneInfo(os.environ.get("HEARTBEAT_TZ", "Africa/Cairo"))
-HEARTBEAT_HOUR = int(os.environ.get("HEARTBEAT_HOUR", "0"))  # 0 = 12 am
+HEARTBEAT_INTERVAL_SECS = int(os.environ.get("HEARTBEAT_INTERVAL_SECS", str(6 * 3600)))
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -134,7 +135,7 @@ def _plain(text):
 
 
 def notify_status(text, silent=False):
-    """Startup notice, warnings, heartbeat: Discord status channel + Telegram."""
+    """Startup notice and warnings: Discord status channel + Telegram."""
     flags = DISCORD_FLAG_SUPPRESS_EMBEDS | (DISCORD_FLAG_SILENT if silent else 0)
     ok = discord_post(DISCORD_HEARTBEAT_WEBHOOK_URL, {
         "username": DISCORD_USERNAME, "content": _plain(text)[:1990], "flags": flags,
@@ -155,22 +156,26 @@ def notify_program(tg_text, title, link, description, color, footer, silent=Fals
 
 
 def send_heartbeat_if_due(current):
-    """Once per day: the first run at/after today's HEARTBEAT_HOUR:00 in HEARTBEAT_TZ."""
+    """Discord only, silent, at most once every HEARTBEAT_INTERVAL_SECS. The timestamp only
+    advances when Discord accepted the message, so a failed send is retried next run."""
+    if not DISCORD_HEARTBEAT_WEBHOOK_URL:
+        print("INFO: no Discord webhook set, heartbeat skipped (heartbeats are Discord-only)")
+        return
     now = int(time.time())
     try:
         last = int(HEARTBEAT_FILE.read_text().strip())
     except (FileNotFoundError, ValueError):
         last = 0
-    local_now = datetime.fromtimestamp(now, HEARTBEAT_TZ)
-    slot = local_now.replace(hour=HEARTBEAT_HOUR, minute=0, second=0, microsecond=0)
-    if local_now < slot or last >= slot.timestamp():
+    if now - last < HEARTBEAT_INTERVAL_SECS:
         return
+    local_now = datetime.fromtimestamp(now, HEARTBEAT_TZ)
     summary = ", ".join(f"{p['name']}: {p['status']}" for p in current.values())
-    if notify_status(
-        f"✅ Daily Intigriti status check at {local_now.strftime('%H:%M %Z')}: monitor alive "
-        f"({summary or 'nothing watched'})",
-        silent=True,
-    ):
+    text = (f"✅ Intigriti status check at {local_now.strftime('%H:%M %Z')}: monitor alive "
+            f"({summary or 'nothing watched'})")
+    if discord_post(DISCORD_HEARTBEAT_WEBHOOK_URL, {
+            "username": DISCORD_USERNAME, "content": text[:1990],
+            "flags": DISCORD_FLAG_SUPPRESS_EMBEDS | DISCORD_FLAG_SILENT,
+            "allowed_mentions": {"parse": []}}):
         HEARTBEAT_FILE.write_text(str(now))
 
 
@@ -419,7 +424,7 @@ def main():
         notify_status(
             f"✅ Intigriti status monitor started — watching {len(current)} programs\n\n{summary}"
         )
-        HEARTBEAT_FILE.write_text(str(int(time.time())))  # next heartbeat at the coming midnight
+        HEARTBEAT_FILE.write_text(str(int(time.time())))  # first heartbeat 6 hours from now
         return
 
     previous = json.loads(STATE_FILE.read_text())
@@ -451,7 +456,7 @@ def main():
     # Merge: entries missing from this response (flaky API) keep their old status
     STATE_FILE.write_text(json.dumps(previous, indent=2))
 
-    # Daily heartbeat, sent at 12 am even if this run also sent alerts
+    # Heartbeat every 6 hours (Discord only), also on runs that sent alerts
     send_heartbeat_if_due(current)
 
 
