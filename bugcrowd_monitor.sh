@@ -2,7 +2,8 @@
 # bugcrowd_monitor.sh
 # Monitors Bugcrowd's public program directory (bug_bounty + vdp categories)
 # for new programs and sends Telegram alerts. No auth required.
-# Sends a silent "no new programs" heartbeat at most once every 6 hours.
+# Sends a silent daily heartbeat on the first run at/after HEARTBEAT_HOUR:00
+# in HEARTBEAT_TZ (default 00:00 Africa/Cairo).
 
 set -euo pipefail
 
@@ -14,7 +15,8 @@ TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:?Set TELEGRAM_CHAT_ID env var}"
 STATE_DIR="state"
 STATE_FILE="${STATE_DIR}/known_bugcrowd_programs.json"
 HEARTBEAT_FILE="${STATE_DIR}/bugcrowd_last_heartbeat"
-HEARTBEAT_INTERVAL_SECS=$((6 * 3600))
+HEARTBEAT_TZ="${HEARTBEAT_TZ:-Africa/Cairo}"
+HEARTBEAT_HOUR="${HEARTBEAT_HOUR:-0}"  # 0 = 12 am
 BASE_URL="https://bugcrowd.com/engagements-us.json"
 CATEGORIES=("bug_bounty" "vdp")
 
@@ -115,16 +117,19 @@ ${full_url}"
   echo "$msg"
 }
 
+# Fires once per day: on the first run at/after today's HEARTBEAT_HOUR:00 in HEARTBEAT_TZ.
 send_heartbeat_if_due() {
   local current_count="$1"
-  local now last_heartbeat
+  local new_count="$2"
+  local now last_heartbeat slot
 
   now=$(date -u +%s)
+  slot=$(TZ="$HEARTBEAT_TZ" date -d "today $(printf '%02d' "$HEARTBEAT_HOUR"):00" +%s)
   last_heartbeat=0
-  [[ -f "$HEARTBEAT_FILE" ]] && last_heartbeat=$(cat "$HEARTBEAT_FILE")
+  [[ -s "$HEARTBEAT_FILE" ]] && last_heartbeat=$(cat "$HEARTBEAT_FILE")
 
-  if (( now - last_heartbeat >= HEARTBEAT_INTERVAL_SECS )); then
-    send_telegram "✅ Bugcrowd check OK at $(date -u +'%H:%M UTC'): no new programs (tracking ${current_count})" true
+  if (( now >= slot && last_heartbeat < slot )); then
+    send_telegram "✅ Daily Bugcrowd check at $(TZ="$HEARTBEAT_TZ" date +'%H:%M %Z'): monitor alive, ${new_count} new program(s) this run (tracking ${current_count})" true
     echo "$now" > "$HEARTBEAT_FILE"
   fi
 }
@@ -149,11 +154,12 @@ if [[ -s "$STATE_FILE" ]]; then
       send_telegram "$alert"
       sleep 1
     done <<< "$new_urls"
-    # No heartbeat on a run that already sent real alerts.
-  else
-    total_count=$(echo "$all_known" | wc -l)
-    send_heartbeat_if_due "$total_count"
   fi
+
+  # Daily heartbeat is sent at 12 am even if this run also sent alerts.
+  total_count=$(echo "$all_known" | wc -l)
+  new_count=$(echo "$new_urls" | sed '/^$/d' | wc -l)
+  send_heartbeat_if_due "$total_count" "$new_count"
 else
   all_known="$current_urls"
   total_count=$(echo "$current_urls" | wc -l)
@@ -166,7 +172,7 @@ else
   send_telegram "✅ Bugcrowd monitor started - tracking ${total_count} programs
 
 Breakdown by type: ${breakdown}"
-  date -u +%s > "$HEARTBEAT_FILE"
+  date -u +%s > "$HEARTBEAT_FILE"  # next heartbeat at the coming midnight
 fi
 
 echo "$all_known" > "$STATE_FILE"
