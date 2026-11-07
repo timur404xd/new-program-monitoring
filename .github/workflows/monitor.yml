@@ -26,7 +26,7 @@ jobs:
       # both TELEGRAM_* secrets exist (delete those lines/secrets to go Discord-only).
       - name: Run Bugcrowd monitor
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_NEW_PROGRAMS_WEBHOOK }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_PROGRAMS_WEBHOOK }}
           DISCORD_HEARTBEAT_WEBHOOK_URL: ${{ secrets.DISCORD_STATUS_WEBHOOK }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -38,7 +38,7 @@ jobs:
         if: always()  # still run if the Bugcrowd monitor failed
         env:
           INTIGRITI_API_TOKEN: ${{ secrets.INTIGRITI_API_TOKEN }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_NEW_PROGRAMS_WEBHOOK }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_PROGRAMS_WEBHOOK }}
           DISCORD_HEARTBEAT_WEBHOOK_URL: ${{ secrets.DISCORD_STATUS_WEBHOOK }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -55,8 +55,8 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_STATUS_WATCHLIST_CHANNEL_ID: ${{ secrets.DISCORD_STATUS_WATCHLIST_CHANNEL_ID }}
           DISCORD_OWNER_ID: ${{ secrets.DISCORD_OWNER_ID }}
-          # where status changes go
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_PROGRAM_STATUS_WEBHOOK }}
+          # status changes go to the same channel as new programs
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_PROGRAMS_WEBHOOK }}
           DISCORD_HEARTBEAT_WEBHOOK_URL: ${{ secrets.DISCORD_STATUS_WEBHOOK }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
